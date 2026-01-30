@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chore Speedrun</title>
+
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0b0b10;
+    color: white;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+#screen {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 24px;
+}
+
+.big {
+    font-size: 40px;
+    font-weight: 700;
+}
+
+.timer {
+    font-size: 72px;
+    margin-top: 12px;
+}
+
+.stats {
+    margin-top: 16px;
+    font-size: 16px;
+    opacity: 0.75;
+    line-height: 1.5;
+}
+
+.positive { color: #6cff9a; }
+.negative { color: #ff6c6c; }
+
+.tap {
+    position: absolute;
+    bottom: 24px;
+    width: 100%;
+    text-align: center;
+    opacity: 0.4;
+    font-size: 14px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="screen">
+    <div class="big" id="title">START</div>
+    <div class="stats" id="stats">5 minute speedrun<br>Tap anywhere to begin</div>
+</div>
+
+<div class="tap">tap to continue</div>
+
+<script>
+/* ======================
+   BASE TASK WEIGHTS
+   (relative effort, not seconds)
+====================== */
+const baseTasks = [
+    { name: "Cans", weight: 1 },
+    { name: "Bottles", weight: 1 },
+    { name: "Clothes", weight: 1 },
+    { name: "Trash", weight: 2 },
+    { name: "Shoes", weight: 1 },
+    { name: "Stray Dishes", weight: 2 },
+    { name: "Dog Toys", weight: 1 },
+    { name: "Bathroom Clothes", weight: 1 },
+    { name: "Bathroom Trash", weight: 1 }
+];
+
+const TOTAL_RUN_TIME = 300; // 5 minutes
+
+/* ======================
+   STATE
+====================== */
+let tasks = [];
+let index = -1;
+let remaining = 0;
+let timer = null;
+let started = false;
+
+let taskStartTime = 0;
+let totalExpected = 0;
+let totalActual = 0;
+
+/* ======================
+   AUDIO ENGINE (CATCHY)
+====================== */
+let audioCtx = null;
+let beatTimeout = null;
+let step = 0;
+
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+}
+
+function playTone(freq, duration = 0.06, volume = 0.18) {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+}
+
+function startRhythm(totalSeconds) {
+    stopRhythm();
+    step = 0;
+
+    function tick() {
+        if (remaining <= 0) return;
+
+        const base = remaining <= 5 ? 880 : 660;
+        const alt = remaining <= 5 ? 1040 : 820;
+        playTone(step % 2 === 0 ? base : alt);
+
+        let interval =
+            remaining > totalSeconds * 0.5 ? 650 :
+            remaining > totalSeconds * 0.25 ? 420 :
+            remaining > 5 ? 260 : 150;
+
+        step++;
+        beatTimeout = setTimeout(tick, interval);
+    }
+    tick();
+}
+
+function stopRhythm() {
+    if (beatTimeout) {
+        clearTimeout(beatTimeout);
+        beatTimeout = null;
+    }
+}
+
+function timeUpAlert() {
+    stopRhythm();
+    if (!audioCtx) return;
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(420, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(120, audioCtx.currentTime + 0.8);
+    gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.8);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.9);
+}
+
+/* ======================
+   HELPERS
+====================== */
+function shuffle(array) {
+    return array
+        .map(v => ({ v, r: Math.random() }))
+        .sort((a, b) => a.r - b.r)
+        .map(o => o.v);
+}
+
+function formatTime(seconds) {
+    const sign = seconds < 0 ? "-" : "";
+    seconds = Math.abs(seconds);
+    if (seconds < 60) return `${sign}${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return s === 0 ? `${sign}${m}m` : `${sign}${m}m ${s}s`;
+}
+
+/* ======================
+   TASK NORMALIZATION
+====================== */
+function buildRunTasks() {
+    const shuffled = shuffle([...baseTasks]);
+    const totalWeight = shuffled.reduce((s, t) => s + t.weight, 0);
+
+    let allocated = 0;
+
+    const normalized = shuffled.map((t, i) => {
+        let est = Math.round((t.weight / totalWeight) * TOTAL_RUN_TIME);
+        allocated += est;
+        return { name: t.name, est };
+    });
+
+    // Fix rounding drift
+    const diff = TOTAL_RUN_TIME - allocated;
+    normalized[0].est += diff;
+
+    return normalized;
+}
+
+/* ======================
+   MAIN FLOW
+====================== */
+const title = document.getElementById("title");
+const stats = document.getElementById("stats");
+
+function nextScreen() {
+    initAudio();
+
+    if (!started) {
+        tasks = buildRunTasks();
+        index = -1;
+        totalExpected = 0;
+        totalActual = 0;
+        started = true;
+    }
+
+    if (timer) {
+        clearInterval(timer);
+        stopRhythm();
+
+        const actual = Math.round((Date.now() - taskStartTime) / 1000);
+        const expected = tasks[index].est;
+        const delta = expected - actual;
+
+        totalExpected += expected;
+        totalActual += actual;
+
+        stats.innerHTML =
+            `Expected: ${formatTime(expected)}<br>` +
+            `Actual: ${formatTime(actual)}<br>` +
+            `<span class="${delta >= 0 ? "positive" : "negative"}">
+             ${delta >= 0 ? "Saved" : "Lost"}: ${formatTime(delta)}
+             </span>`;
+    }
+
+    index++;
+
+    if (index >= tasks.length) {
+        const net = totalExpected - totalActual;
+        title.textContent = "RUN COMPLETE";
+        stats.innerHTML =
+            `Expected total: 5m<br>` +
+            `Actual total: ${formatTime(totalActual)}<br>` +
+            `<span class="${net >= 0 ? "positive" : "negative"}">
+             Net ${net >= 0 ? "saved" : "lost"}: ${formatTime(net)}
+             </span>`;
+        started = false;
+        return;
+    }
+
+    const task = tasks[index];
+    remaining = task.est;
+    taskStartTime = Date.now();
+
+    title.textContent = task.name;
+    stats.innerHTML =
+        `Expected: ${formatTime(task.est)}<br>` +
+        `<div class="timer">${remaining}</div>`;
+
+    startRhythm(task.est);
+
+    timer = setInterval(() => {
+        remaining--;
+        document.querySelector(".timer").textContent = remaining;
+        if (remaining <= 0) {
+            clearInterval(timer);
+            timeUpAlert();
+        }
+    }, 1000);
+}
+
+document.body.addEventListener("click", nextScreen);
+</script>
+
+</body>
+</html>
